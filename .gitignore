@@ -4,6 +4,7 @@
 data/raw/
 data/processed/
 data/artifacts/
+data/
 
 # Explicit large raw dataset (safety net)
 goodreads_books.json.gz
