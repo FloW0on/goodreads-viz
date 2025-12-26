@@ -67,3 +67,8 @@ logs/
 .DS_Store
 Thumbs.db
 
+# ==================================================
+# Web demo outputs (derived / local only)
+# ==================================================
+web/public/packed/
+web/public/.vscode/

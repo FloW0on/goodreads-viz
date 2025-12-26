@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Goodreads UMAP WebGPU</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0b0b; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #hud {
+        position: fixed; left: 12px; top: 10px; color: #cfcfcf;
+        font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        user-select: none; pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">loading...</div>
+    <canvas id="c"></canvas>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
