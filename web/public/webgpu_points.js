@@ -9,23 +9,7 @@ async function fetchText(url) {
   return await r.text();
 }
 
-function makeOrtho(scale, tx, ty) {
-  return { scale, tx, ty };
-}
-
-function worldToScreen(x, y, cam, w, h) {
-  const cx = x * cam.scale + cam.tx;
-  const cy = y * cam.scale + cam.ty;
-  const sx = (cx * 0.5 + 0.5) * w;
-  const sy = (1.0 - (cy * 0.5 + 0.5)) * h;
-  return { sx, sy };
-}
-
-function fmt(v, digits = 2) {
-  if (v === null || v === undefined) return "—";
-  if (Number.isFinite(v)) return v.toFixed(digits);
-  return "—";
-}
+function clamp01(x) { return Math.max(0, Math.min(1, x)); }
 
 const PALETTE = [
   [0.121, 0.466, 0.705],
@@ -39,13 +23,6 @@ const PALETTE = [
   [0.737, 0.741, 0.133],
   [0.090, 0.745, 0.811],
 ];
-
-function clamp01(x) { return Math.max(0, Math.min(1, x)); }
-
-function binIndex(v, bins) {
-  for (let i = 0; i < bins.length; i++) if (v <= bins[i]) return i;
-  return bins.length;
-}
 
 function buildColors(extra, mode) {
   const n = extra.length;
@@ -100,39 +77,55 @@ function buildColors(extra, mode) {
   return colors;
 }
 
+function makeCam(scale = 0.22, tx = 0, ty = 0) {
+  return { scale, tx, ty };
+}
+
+function worldToScreen(x, y, cam, w, h) {
+  const cx = x * cam.scale + cam.tx;
+  const cy = y * cam.scale + cam.ty;
+  const sx = (cx * 0.5 + 0.5) * w;
+  const sy = (1.0 - (cy * 0.5 + 0.5)) * h;
+  return { sx, sy };
+}
+
 export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colorMode = "year" }) {
   if (!("gpu" in navigator)) throw new Error("WebGPU not supported in this browser.");
 
   const meta = await (await fetch(metaUrl)).json();
   const pointsUrl = meta.files.points_xy.replace(/^.*\/packed\//, "./packed/");
-  const idsUrl = meta.files.ids.replace(/^.*\/packed\//, "./packed/");
+  const idsUrl    = meta.files.ids.replace(/^.*\/packed\//, "./packed/");
 
-  hud.textContent = "loading points/ids…";
-  const [pointsBuf, idsBuf] = await Promise.all([
+  hud.textContent = "loading points/ids/meta…";
+  const [pointsBuf, idsBuf, metaJsonlText] = await Promise.all([
     fetchArrayBuffer(pointsUrl),
     fetchArrayBuffer(idsUrl),
+    fetchText(metaExtraUrl),
   ]);
-
-  let extra = null;
-  if (metaExtraUrl) {
-    hud.textContent = "loading meta (jsonl)…";
-    const txt = await fetchText(metaExtraUrl);
-    const lines = txt.split("\n").filter(Boolean);
-    extra = new Array(lines.length);
-    for (let i = 0; i < lines.length; i++) extra[i] = JSON.parse(lines[i]);
-  } else {
-    throw new Error("metaExtraUrl is required for colored points.");
-  }
 
   const n = meta.n;
   const xy = new Float32Array(pointsBuf);
   const ids = new Uint32Array(idsBuf);
 
+  const lines = metaJsonlText.split("\n").filter(Boolean);
+  if (lines.length !== n) throw new Error(`meta jsonl lines mismatch: ${lines.length} vs ${n}`);
+
+  const extra = new Array(n);
+  for (let i = 0; i < n; i++) extra[i] = JSON.parse(lines[i]);
+
   if (xy.length !== n * 2) throw new Error(`xy length mismatch: ${xy.length} vs ${n * 2}`);
   if (ids.length !== n) throw new Error(`ids length mismatch: ${ids.length} vs ${n}`);
-  if (extra.length !== n) throw new Error(`meta jsonl lines mismatch: ${extra.length} vs ${n}`);
 
   const colorsCPU = buildColors(extra, colorMode);
+
+  const inst = new Float32Array(n * 5);
+  for (let i = 0; i < n; i++) {
+    inst[i * 5 + 0] = xy[i * 2 + 0];
+    inst[i * 5 + 1] = xy[i * 2 + 1];
+    inst[i * 5 + 2] = colorsCPU[i * 3 + 0];
+    inst[i * 5 + 3] = colorsCPU[i * 3 + 1];
+    inst[i * 5 + 4] = colorsCPU[i * 3 + 2];
+  }
 
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("No GPU adapter found.");
@@ -141,32 +134,45 @@ export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colo
   const context = canvas.getContext("webgpu");
   const format = navigator.gpu.getPreferredCanvasFormat();
 
-  function resize() {
+  let cam = makeCam(0.22, 0, 0);
+  let pointSizePx = 3.0;
+
+  function configure() {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const w = Math.floor(canvas.clientWidth * dpr);
     const h = Math.floor(canvas.clientHeight * dpr);
     if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w; canvas.height = h;
+      canvas.width = w;
+      canvas.height = h;
       context.configure({ device, format, alphaMode: "premultiplied" });
     }
+    return { w, h, dpr };
   }
-  resize();
-  window.addEventListener("resize", resize);
+  let vp = configure();
+  window.addEventListener("resize", () => { vp = configure(); });
 
-  const pointsGPU = device.createBuffer({
-    size: pointsBuf.byteLength,
+  const instGPU = device.createBuffer({
+    size: inst.byteLength,
     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
-  device.queue.writeBuffer(pointsGPU, 0, pointsBuf);
+  device.queue.writeBuffer(instGPU, 0, inst);
 
-  const colorsGPU = device.createBuffer({
-    size: colorsCPU.byteLength,
+  const quad = new Float32Array([
+    -1, -1,
+     1, -1,
+     1,  1,
+    -1, -1,
+     1,  1,
+    -1,  1,
+  ]);
+  const quadGPU = device.createBuffer({
+    size: quad.byteLength,
     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
-  device.queue.writeBuffer(colorsGPU, 0, colorsCPU);
+  device.queue.writeBuffer(quadGPU, 0, quad);
 
   const uniformGPU = device.createBuffer({
-    size: 16,
+    size: 32,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
@@ -176,30 +182,48 @@ export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colo
         scale: f32,
         tx: f32,
         ty: f32,
-        _pad: f32,
+        pointSizePx: f32,
+        viewportW: f32,
+        viewportH: f32,
+        _pad0: f32,
+        _pad1: f32,
       };
       @group(0) @binding(0) var<uniform> u: U;
 
       struct VSOut {
         @builtin(position) pos: vec4<f32>,
         @location(0) col: vec3<f32>,
+        @location(1) local: vec2<f32>,
       };
 
+      // per-vertex: quad corner (-1..1)
+      // per-instance: center xy + color rgb
       @vertex
       fn vs(
-        @location(0) aPos: vec2<f32>,
-        @location(1) aCol: vec3<f32>
+        @location(0) aCorner: vec2<f32>,
+        @location(1) aCenter: vec2<f32>,
+        @location(2) aCol: vec3<f32>,
       ) -> VSOut {
         var o: VSOut;
-        let x = aPos.x * u.scale + u.tx;
-        let y = aPos.y * u.scale + u.ty;
-        o.pos = vec4<f32>(x, y, 0.0, 1.0);
+
+        // world -> clip
+        let cx = aCenter.x * u.scale + u.tx;
+        let cy = aCenter.y * u.scale + u.ty;
+
+        // corner offset in clip space (pixel -> clip)
+        let dx = (aCorner.x * u.pointSizePx) * (2.0 / u.viewportW);
+        let dy = (aCorner.y * u.pointSizePx) * (2.0 / u.viewportH);
+
+        o.pos = vec4<f32>(cx + dx, cy + dy, 0.0, 1.0);
         o.col = aCol;
+        o.local = aCorner; // for round mask
         return o;
       }
 
       @fragment
       fn fs(i: VSOut) -> @location(0) vec4<f32> {
+        let r2 = dot(i.local, i.local);
+        if (r2 > 1.0) { discard; }
         return vec4<f32>(i.col, 1.0);
       }
     `,
@@ -213,11 +237,16 @@ export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colo
       buffers: [
         {
           arrayStride: 8,
+          stepMode: "vertex",
           attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }],
         },
         {
-          arrayStride: 12,
-          attributes: [{ shaderLocation: 1, offset: 0, format: "float32x3" }],
+          arrayStride: 20,
+          stepMode: "instance",
+          attributes: [
+            { shaderLocation: 1, offset: 0,  format: "float32x2" },
+            { shaderLocation: 2, offset: 8,  format: "float32x3" },
+          ],
         },
       ],
     },
@@ -226,7 +255,7 @@ export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colo
       entryPoint: "fs",
       targets: [{ format }],
     },
-    primitive: { topology: "point-list" },
+    primitive: { topology: "triangle-list" },
   });
 
   const bindGroup = device.createBindGroup({
@@ -234,27 +263,25 @@ export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colo
     entries: [{ binding: 0, resource: { buffer: uniformGPU } }],
   });
 
-  let cam = makeOrtho(0.22, 0.0, 0.0);
-
   let dragging = false;
   let lastX = 0, lastY = 0;
 
   canvas.addEventListener("mousedown", (e) => {
-    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    dragging = true;
+    lastX = e.clientX; lastY = e.clientY;
   });
   window.addEventListener("mouseup", () => dragging = false);
+
   window.addEventListener("mousemove", (e) => {
     if (dragging) {
       const dx = e.clientX - lastX;
       const dy = e.clientY - lastY;
       lastX = e.clientX; lastY = e.clientY;
 
-      const dpr = Math.max(1, window.devicePixelRatio || 1);
-      const w = canvas.width, h = canvas.height;
+      const { w, h, dpr } = vp;
       cam.tx += (dx * dpr) * (2 / w);
       cam.ty -= (dy * dpr) * (2 / h);
     }
-    updateHover(e);
   });
 
   canvas.addEventListener("wheel", (e) => {
@@ -264,74 +291,22 @@ export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colo
     cam.scale = Math.min(Math.max(cam.scale, 0.01), 10.0);
   }, { passive: false });
 
-  let hoverIndex = -1;
-  let pinnedIndex = -1;
-
-  function describe(i) {
-    const id = ids[i];
-    const m = extra[i];
-    const year = m.publication_year ?? "—";
-    const pages = m.num_pages ?? "—";
-    const rating = m.average_rating ?? null;
-    return `#${i}  id=${id}
-${m.title}
-rating=${rating === null ? "—" : fmt(rating, 2)}  year=${year}  pages=${pages}`;
-  }
-
-  function updateHud() {
-    const i = pinnedIndex >= 0 ? pinnedIndex : hoverIndex;
-    if (i < 0) {
-      hud.textContent = `loaded: n=${n}
-color by: ${colorMode}
-(hover a point; click to pin)
-Drag: pan, Wheel: zoom`;
-    } else {
-      const mode = pinnedIndex >= 0 ? "PINNED" : "HOVER";
-      hud.textContent = `${mode}  (color by: ${colorMode})
-${describe(i)}
-
-(Drag: pan, Wheel: zoom, Click: pin/unpin)`;
-    }
-  }
-
-  function updateHover(e) {
-    const rect = canvas.getBoundingClientRect();
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    const mx = (e.clientX - rect.left) * dpr;
-    const my = (e.clientY - rect.top) * dpr;
-    const w = canvas.width, h = canvas.height;
-
-    const R = 10 * dpr;
-    const R2 = R * R;
-
-    let best = -1;
-    let bestD2 = R2;
-
-    for (let i = 0; i < n; i++) {
-      const x = xy[i * 2], y = xy[i * 2 + 1];
-      const { sx, sy } = worldToScreen(x, y, cam, w, h);
-      const dx = sx - mx;
-      const dy = sy - my;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < bestD2) {
-        bestD2 = d2;
-        best = i;
-      }
-    }
-    hoverIndex = best;
-    updateHud();
-  }
-
-  canvas.addEventListener("click", () => {
-    if (hoverIndex >= 0) pinnedIndex = (pinnedIndex === hoverIndex) ? -1 : hoverIndex;
-    else pinnedIndex = -1;
-    updateHud();
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "+" || e.key === "=") pointSizePx = Math.min(20, pointSizePx + 1);
+    if (e.key === "-" || e.key === "_") pointSizePx = Math.max(1, pointSizePx - 1);
   });
 
-  function frame() {
-    resize();
+  hud.textContent =
+`loaded: n=${n}
+color by: ${colorMode}
+drag: pan, wheel: zoom
++/- : point size (${pointSizePx}px)`;
 
-    const u = new Float32Array([cam.scale, cam.tx, cam.ty, 0.0]);
+  function frame() {
+    vp = configure();
+    const { w, h } = vp;
+
+    const u = new Float32Array([cam.scale, cam.tx, cam.ty, pointSizePx, w, h, 0, 0]);
     device.queue.writeBuffer(uniformGPU, 0, u.buffer);
 
     const encoder = device.createCommandEncoder();
@@ -348,15 +323,16 @@ ${describe(i)}
 
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.setVertexBuffer(0, pointsGPU);
-    pass.setVertexBuffer(1, colorsGPU);
-    pass.draw(n, 1, 0, 0);
-    pass.end();
 
+    pass.setVertexBuffer(0, quadGPU);
+    pass.setVertexBuffer(1, instGPU);
+
+    pass.draw(6, n, 0, 0);
+
+    pass.end();
     device.queue.submit([encoder.finish()]);
     requestAnimationFrame(frame);
   }
 
-  updateHud();
   requestAnimationFrame(frame);
 }
