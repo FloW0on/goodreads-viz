@@ -72,3 +72,5 @@ Thumbs.db
 # ==================================================
 web/public/packed/
 web/public/.vscode/
+# web demo packed data (served via symlink; never commit binaries)
+web/public/packed/
