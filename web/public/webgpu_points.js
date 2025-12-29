@@ -3,129 +3,135 @@ async function fetchArrayBuffer(url) {
   if (!r.ok) throw new Error(`fetch failed: ${url} (${r.status})`);
   return await r.arrayBuffer();
 }
-async function fetchText(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch failed: ${url} (${r.status})`);
-  return await r.text();
+
+function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+function toPackedRelative(p) {
+  return String(p).replace(/^.*\/packed\//, "./packed/");
 }
 
-function clamp01(x) { return Math.max(0, Math.min(1, x)); }
-
-const PALETTE = [
-  [0.121, 0.466, 0.705],
-  [1.000, 0.498, 0.054],
-  [0.172, 0.627, 0.172],
-  [0.839, 0.153, 0.157],
-  [0.580, 0.404, 0.741],
-  [0.549, 0.337, 0.294],
-  [0.890, 0.467, 0.761],
-  [0.498, 0.498, 0.498],
-  [0.737, 0.741, 0.133],
-  [0.090, 0.745, 0.811],
-];
-
-function buildColors(extra, mode) {
-  const n = extra.length;
-  const colors = new Float32Array(n * 3);
-
-  if (mode === "rating") {
-    for (let i = 0; i < n; i++) {
-      const r = extra[i].average_rating;
-      const t = r == null ? 0 : clamp01(r / 5.0);
-      const idx = Math.min(PALETTE.length - 1, Math.floor(t * PALETTE.length));
-      const [R, G, B] = PALETTE[idx];
-      colors[i * 3 + 0] = R;
-      colors[i * 3 + 1] = G;
-      colors[i * 3 + 2] = B;
-    }
-    return colors;
-  }
-
-  if (mode === "pages") {
-    for (let i = 0; i < n; i++) {
-      const p = extra[i].num_pages;
-      const t = p == null ? 0 : clamp01(Math.log1p(p) / Math.log1p(1200));
-      const idx = Math.min(PALETTE.length - 1, Math.floor(t * PALETTE.length));
-      const [R, G, B] = PALETTE[idx];
-      colors[i * 3 + 0] = R;
-      colors[i * 3 + 1] = G;
-      colors[i * 3 + 2] = B;
-    }
-    return colors;
-  }
-
-  let minY = Infinity, maxY = -Infinity;
+function makePalette(n) {
+  const out = new Uint8Array(n * 4);
   for (let i = 0; i < n; i++) {
-    const y = extra[i].publication_year;
-    if (y != null && y > 0) {
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
+    const h = (i * 137.508) % 360; 
+    const s = 0.70;
+    const l = 0.50;
+    const [r,g,b] = hslToRgb(h/360, s, l);
+    out[i*4+0] = r;
+    out[i*4+1] = g;
+    out[i*4+2] = b;
+    out[i*4+3] = 255;
   }
-  if (!Number.isFinite(minY) || !Number.isFinite(maxY) || minY === maxY) {
-    minY = 1900; maxY = 2025;
-  }
-  for (let i = 0; i < n; i++) {
-    const y = extra[i].publication_year;
-    const t = (y == null || y <= 0) ? 0 : clamp01((y - minY) / (maxY - minY));
-    const idx = Math.min(PALETTE.length - 1, Math.floor(t * PALETTE.length));
-    const [R, G, B] = PALETTE[idx];
-    colors[i * 3 + 0] = R;
-    colors[i * 3 + 1] = G;
-    colors[i * 3 + 2] = B;
-  }
-  return colors;
+  return out;
 }
 
-function makeCam(scale = 0.22, tx = 0, ty = 0) {
-  return { scale, tx, ty };
+function hslToRgb(h, s, l) {
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1/6) return p + (q - p) * 6 * t;
+    if (t < 1/2) return q;
+    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+    return p;
+  };
+  let r, g, b;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const q = l < 0.5 ? l * (1 + s) : (l + s - l*s);
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1/3);
+  }
+  return [Math.round(r*255), Math.round(g*255), Math.round(b*255)];
 }
 
-function worldToScreen(x, y, cam, w, h) {
-  const cx = x * cam.scale + cam.tx;
-  const cy = y * cam.scale + cam.ty;
-  const sx = (cx * 0.5 + 0.5) * w;
-  const sy = (1.0 - (cy * 0.5 + 0.5)) * h;
-  return { sx, sy };
+function rgbaToCss(r,g,b,a=255){ return `rgba(${r},${g},${b},${a/255})`; }
+
+function renderLegend(legendEl, labelsJson, paletteRGBA) {
+  const labels = labelsJson.labels || {};
+  const keys = Object.keys(labels).map(k => parseInt(k,10)).sort((a,b)=>a-b);
+
+  keys.sort((a,b) => (labels[b]?.size||0) - (labels[a]?.size||0));
+
+  legendEl.innerHTML = "";
+  const h = document.createElement("h3");
+  h.textContent = "Topics (cluster keywords)";
+  legendEl.appendChild(h);
+
+  for (const k of keys.slice(0, 30)) { 
+    const info = labels[String(k)];
+    const r = paletteRGBA[k*4+0], g = paletteRGBA[k*4+1], b = paletteRGBA[k*4+2];
+    const row = document.createElement("div");
+    row.className = "item";
+
+    const sw = document.createElement("div");
+    sw.className = "swatch";
+    sw.style.background = rgbaToCss(r,g,b);
+
+    const t = document.createElement("div");
+    t.className = "label";
+    const title = document.createElement("div");
+    title.textContent = `#${k} ${info?.label || ""}`;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `size=${info?.size ?? 0}  keywords=${(info?.keywords||[]).slice(0,6).join(", ")}`;
+
+    t.appendChild(title);
+    t.appendChild(meta);
+
+    row.appendChild(sw);
+    row.appendChild(t);
+    legendEl.appendChild(row);
+  }
+
+  legendEl.hidden = false;
 }
 
-export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colorMode = "year" }) {
+export async function runWebGPUPoints({ canvas, hud, legendEl, metaUrl }) {
   if (!("gpu" in navigator)) throw new Error("WebGPU not supported in this browser.");
 
   const meta = await (await fetch(metaUrl)).json();
-  const pointsUrl = meta.files.points_xy.replace(/^.*\/packed\//, "./packed/");
-  const idsUrl    = meta.files.ids.replace(/^.*\/packed\//, "./packed/");
+  const n = meta.n;
 
-  hud.textContent = "loading points/ids/meta…";
-  const [pointsBuf, idsBuf, metaJsonlText] = await Promise.all([
+  const pointsUrl  = toPackedRelative(meta.files.points_xy);
+  const idsUrl     = toPackedRelative(meta.files.ids);
+
+  const clusterUrl = toPackedRelative(meta.files.cluster);
+  const labelUrl   = toPackedRelative(meta.files.cluster_labels);
+
+  hud.textContent = "loading buffers…";
+
+  const [pointsBuf, idsBuf, clusterBuf, labelsJson] = await Promise.all([
     fetchArrayBuffer(pointsUrl),
     fetchArrayBuffer(idsUrl),
-    fetchText(metaExtraUrl),
+    fetchArrayBuffer(clusterUrl),
+    (await fetch(labelUrl)).json(),
   ]);
 
-  const n = meta.n;
   const xy = new Float32Array(pointsBuf);
   const ids = new Uint32Array(idsBuf);
+  const cluster = new Uint16Array(clusterBuf);
 
-  const lines = metaJsonlText.split("\n").filter(Boolean);
-  if (lines.length !== n) throw new Error(`meta jsonl lines mismatch: ${lines.length} vs ${n}`);
-
-  const extra = new Array(n);
-  for (let i = 0; i < n; i++) extra[i] = JSON.parse(lines[i]);
-
-  if (xy.length !== n * 2) throw new Error(`xy length mismatch: ${xy.length} vs ${n * 2}`);
+  if (xy.length !== n*2) throw new Error(`xy length mismatch: ${xy.length} vs ${n*2}`);
   if (ids.length !== n) throw new Error(`ids length mismatch: ${ids.length} vs ${n}`);
+  if (cluster.length !== n) throw new Error(`cluster length mismatch: ${cluster.length} vs ${n}`);
 
-  const colorsCPU = buildColors(extra, colorMode);
+  const numClusters = labelsJson.num_clusters ?? 0;
+  const noiseBucket = labelsJson.noise_bucket ?? numClusters;
 
-  const inst = new Float32Array(n * 5);
-  for (let i = 0; i < n; i++) {
-    inst[i * 5 + 0] = xy[i * 2 + 0];
-    inst[i * 5 + 1] = xy[i * 2 + 1];
-    inst[i * 5 + 2] = colorsCPU[i * 3 + 0];
-    inst[i * 5 + 3] = colorsCPU[i * 3 + 1];
-    inst[i * 5 + 4] = colorsCPU[i * 3 + 2];
+  const palette = makePalette(numClusters + 1);
+  if (noiseBucket < numClusters + 1) {
+    palette[noiseBucket*4+0] = 160;
+    palette[noiseBucket*4+1] = 160;
+    palette[noiseBucket*4+2] = 160;
+    palette[noiseBucket*4+3] = 255;
   }
+
+  renderLegend(legendEl, labelsJson, palette);
+
+  hud.textContent = `loaded: n=${n} | topics=${numClusters} (+noise) | drag: pan | wheel: zoom | +/-: size`;
 
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("No GPU adapter found.");
@@ -134,134 +140,47 @@ export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colo
   const context = canvas.getContext("webgpu");
   const format = navigator.gpu.getPreferredCanvasFormat();
 
-  let cam = makeCam(0.22, 0, 0);
-  let pointSizePx = 3.0;
-
   function configure() {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const w = Math.floor(canvas.clientWidth * dpr);
     const h = Math.floor(canvas.clientHeight * dpr);
     if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+      canvas.width = w; canvas.height = h;
       context.configure({ device, format, alphaMode: "premultiplied" });
     }
-    return { w, h, dpr };
+    return { w, h };
   }
-  let vp = configure();
-  window.addEventListener("resize", () => { vp = configure(); });
 
-  const instGPU = device.createBuffer({
-    size: inst.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-  });
-  device.queue.writeBuffer(instGPU, 0, inst);
+  window.addEventListener("resize", () => configure());
+  let { w: W, h: H } = configure();
 
-  const quad = new Float32Array([
-    -1, -1,
-     1, -1,
-     1,  1,
-    -1, -1,
-     1,  1,
-    -1,  1,
-  ]);
-  const quadGPU = device.createBuffer({
-    size: quad.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  const xyGPU = device.createBuffer({
+    size: xy.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
-  device.queue.writeBuffer(quadGPU, 0, quad);
+  device.queue.writeBuffer(xyGPU, 0, xy);
+
+  const clusterGPU = device.createBuffer({
+    size: cluster.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(clusterGPU, 0, cluster);
+
+  const paletteGPU = device.createBuffer({
+    size: palette.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(paletteGPU, 0, palette);
 
   const uniformGPU = device.createBuffer({
     size: 32,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  const shader = device.createShaderModule({
-    code: `
-      struct U {
-        scale: f32,
-        tx: f32,
-        ty: f32,
-        pointSizePx: f32,
-        viewportW: f32,
-        viewportH: f32,
-        _pad0: f32,
-        _pad1: f32,
-      };
-      @group(0) @binding(0) var<uniform> u: U;
-
-      struct VSOut {
-        @builtin(position) pos: vec4<f32>,
-        @location(0) col: vec3<f32>,
-        @location(1) local: vec2<f32>,
-      };
-
-      // per-vertex: quad corner (-1..1)
-      // per-instance: center xy + color rgb
-      @vertex
-      fn vs(
-        @location(0) aCorner: vec2<f32>,
-        @location(1) aCenter: vec2<f32>,
-        @location(2) aCol: vec3<f32>,
-      ) -> VSOut {
-        var o: VSOut;
-
-        // world -> clip
-        let cx = aCenter.x * u.scale + u.tx;
-        let cy = aCenter.y * u.scale + u.ty;
-
-        // corner offset in clip space (pixel -> clip)
-        let dx = (aCorner.x * u.pointSizePx) * (2.0 / u.viewportW);
-        let dy = (aCorner.y * u.pointSizePx) * (2.0 / u.viewportH);
-
-        o.pos = vec4<f32>(cx + dx, cy + dy, 0.0, 1.0);
-        o.col = aCol;
-        o.local = aCorner; // for round mask
-        return o;
-      }
-
-      @fragment
-      fn fs(i: VSOut) -> @location(0) vec4<f32> {
-        let r2 = dot(i.local, i.local);
-        if (r2 > 1.0) { discard; }
-        return vec4<f32>(i.col, 1.0);
-      }
-    `,
-  });
-
-  const pipeline = device.createRenderPipeline({
-    layout: "auto",
-    vertex: {
-      module: shader,
-      entryPoint: "vs",
-      buffers: [
-        {
-          arrayStride: 8,
-          stepMode: "vertex",
-          attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }],
-        },
-        {
-          arrayStride: 20,
-          stepMode: "instance",
-          attributes: [
-            { shaderLocation: 1, offset: 0,  format: "float32x2" },
-            { shaderLocation: 2, offset: 8,  format: "float32x3" },
-          ],
-        },
-      ],
-    },
-    fragment: {
-      module: shader,
-      entryPoint: "fs",
-      targets: [{ format }],
-    },
-    primitive: { topology: "triangle-list" },
-  });
-
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: uniformGPU } }],
-  });
+  let camScale = 0.22;
+  let camTx = 0.0;
+  let camTy = 0.0;
+  let pointSizePx = 3.0;
 
   let dragging = false;
   let lastX = 0, lastY = 0;
@@ -271,43 +190,133 @@ export async function runWebGPUPoints({ canvas, hud, metaUrl, metaExtraUrl, colo
     lastX = e.clientX; lastY = e.clientY;
   });
   window.addEventListener("mouseup", () => dragging = false);
-
   window.addEventListener("mousemove", (e) => {
-    if (dragging) {
-      const dx = e.clientX - lastX;
-      const dy = e.clientY - lastY;
-      lastX = e.clientX; lastY = e.clientY;
+    if (!dragging) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
 
-      const { w, h, dpr } = vp;
-      cam.tx += (dx * dpr) * (2 / w);
-      cam.ty -= (dy * dpr) * (2 / h);
-    }
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    camTx += (dx * dpr) * (2 / canvas.width);
+    camTy -= (dy * dpr) * (2 / canvas.height);
   });
 
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const k = Math.exp(-e.deltaY * 0.001);
-    cam.scale *= k;
-    cam.scale = Math.min(Math.max(cam.scale, 0.01), 10.0);
+    camScale = clamp(camScale * k, 0.01, 10.0);
   }, { passive: false });
 
   window.addEventListener("keydown", (e) => {
-    if (e.key === "+" || e.key === "=") pointSizePx = Math.min(20, pointSizePx + 1);
-    if (e.key === "-" || e.key === "_") pointSizePx = Math.max(1, pointSizePx - 1);
+    if (e.key === "+" || e.key === "=") pointSizePx = clamp(pointSizePx + 0.5, 1.0, 20.0);
+    if (e.key === "-" || e.key === "_") pointSizePx = clamp(pointSizePx - 0.5, 1.0, 20.0);
   });
 
-  hud.textContent =
-`loaded: n=${n}
-color by: ${colorMode}
-drag: pan, wheel: zoom
-+/- : point size (${pointSizePx}px)`;
+  const shader = device.createShaderModule({
+    code: `
+      struct U {
+        scale: f32,
+        tx: f32,
+        ty: f32,
+        pointSizePx: f32,
+        invW2: f32,   // 2/width
+        invH2: f32,   // 2/height
+        _pad0: f32,
+        _pad1: f32,
+      };
+      @group(0) @binding(0) var<uniform> u: U;
+
+      @group(0) @binding(1) var<storage, read> xy: array<vec2<f32>>;
+      @group(0) @binding(2) var<storage, read> cluster: array<u32>;
+      @group(0) @binding(3) var<storage, read> palette: array<u32>; // RGBA8 packed as 4 bytes in u32? (we'll read as bytes via shifts)
+
+      fn unpackRGBA8(p: u32) -> vec4<f32> {
+        let r: f32 = f32((p      ) & 255u) / 255.0;
+        let g: f32 = f32((p >>  8) & 255u) / 255.0;
+        let b: f32 = f32((p >> 16) & 255u) / 255.0;
+        let a: f32 = f32((p >> 24) & 255u) / 255.0;
+        return vec4<f32>(r,g,b,a);
+      }
+
+      struct VSOut {
+        @builtin(position) pos: vec4<f32>,
+        @location(0) color: vec4<f32>,
+      };
+
+      // 6 vertices -> two triangles for a quad
+      fn corner(vid: u32) -> vec2<f32> {
+        // (x,y) in {-1,+1}
+        // tri1: (-1,-1),(+1,-1),(+1,+1)
+        // tri2: (-1,-1),(+1,+1),(-1,+1)
+        if (vid == 0u) { return vec2<f32>(-1.0, -1.0); }
+        if (vid == 1u) { return vec2<f32>( 1.0, -1.0); }
+        if (vid == 2u) { return vec2<f32>( 1.0,  1.0); }
+        if (vid == 3u) { return vec2<f32>(-1.0, -1.0); }
+        if (vid == 4u) { return vec2<f32>( 1.0,  1.0); }
+        return vec2<f32>(-1.0,  1.0);
+      }
+
+      @vertex
+      fn vs(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> VSOut {
+        var o: VSOut;
+
+        let p = xy[i];
+        let x = p.x * u.scale + u.tx;
+        let y = p.y * u.scale + u.ty;
+
+        let c = corner(v % 6u);
+        let dx = c.x * (u.pointSizePx * 0.5) * u.invW2;
+        let dy = c.y * (u.pointSizePx * 0.5) * u.invH2;
+
+        o.pos = vec4<f32>(x + dx, y + dy, 0.0, 1.0);
+
+        let cid = cluster[i];
+        o.color = unpackRGBA8(palette[cid]);
+        return o;
+      }
+
+      @fragment
+      fn fs(@location(0) color: vec4<f32>) -> @location(0) vec4<f32> {
+        return color;
+      }
+    `,
+  });
+
+  const cluster32 = new Uint32Array(n);
+  for (let i=0; i<n; i++) cluster32[i] = cluster[i];
+  device.queue.writeBuffer(clusterGPU, 0, cluster32);
+
+  const pal32 = new Uint32Array((numClusters + 1));
+  for (let i=0; i<(numClusters+1); i++) {
+    const r = palette[i*4+0], g = palette[i*4+1], b = palette[i*4+2], a = palette[i*4+3];
+    pal32[i] = (r) | (g<<8) | (b<<16) | (a<<24);
+  }
+  device.queue.writeBuffer(paletteGPU, 0, pal32);
+
+  const pipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: shader, entryPoint: "vs" },
+    fragment: { module: shader, entryPoint: "fs", targets: [{ format }] },
+    primitive: { topology: "triangle-list" },
+  });
+
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformGPU } },
+      { binding: 1, resource: { buffer: xyGPU } },
+      { binding: 2, resource: { buffer: clusterGPU } },
+      { binding: 3, resource: { buffer: paletteGPU } },
+    ],
+  });
 
   function frame() {
-    vp = configure();
-    const { w, h } = vp;
+    ({ w: W, h: H } = configure());
+    const invW2 = 2.0 / W;
+    const invH2 = 2.0 / H;
 
-    const u = new Float32Array([cam.scale, cam.tx, cam.ty, pointSizePx, w, h, 0, 0]);
-    device.queue.writeBuffer(uniformGPU, 0, u.buffer);
+    const u = new Float32Array([camScale, camTx, camTy, pointSizePx, invW2, invH2, 0, 0]);
+    device.queue.writeBuffer(uniformGPU, 0, u);
 
     const encoder = device.createCommandEncoder();
     const view = context.getCurrentTexture().createView();
@@ -323,13 +332,9 @@ drag: pan, wheel: zoom
 
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-
-    pass.setVertexBuffer(0, quadGPU);
-    pass.setVertexBuffer(1, instGPU);
-
     pass.draw(6, n, 0, 0);
-
     pass.end();
+
     device.queue.submit([encoder.finish()]);
     requestAnimationFrame(frame);
   }
