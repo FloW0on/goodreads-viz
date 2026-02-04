@@ -66,4 +66,5 @@ web/public/.vscode/
 
 # generated / packed data
 web/public/packed*/
+web/public/packed_n*/
 dataset/
