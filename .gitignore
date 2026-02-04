@@ -63,3 +63,7 @@ web/public/.vscode/
 # force-ignore packed outputs (web demo artifacts)
  /web/public/packed/
  /web/public/packed/**
+
+# generated / packed data
+web/public/packed*/
+dataset/
