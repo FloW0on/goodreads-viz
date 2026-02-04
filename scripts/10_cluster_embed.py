@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# 고차원 임베딩에서 클러스터링
+# 실제 의미적 유사도 기반
 
 import argparse
 import json

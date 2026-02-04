@@ -1,391 +1,206 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-DDC 10대 분류 자동 할당 (임베딩 유사도 기반)
-
-사용법:
-    python 12_assign_ddc.py \
-        --snippet_json ./web/public/packed/id2snippet_n10000_seed42.json \
-        --ids_file ./web/public/packed/ids_n10000_seed42_umap2d.uint32 \
-        --out_dir ./web/public/packed \
-        --tag n10000_seed42
+12_assign_ddc.py
+책 임베딩을 DDC 10개 주류에 할당 (미분류 강제 할당 옵션 포함)
 """
 
 import argparse
 import json
 from pathlib import Path
+
 import numpy as np
-from tqdm import tqdm
+from sentence_transformers import SentenceTransformer
 
-# ============================================================
-# DDC 10대 분류 정의
-# ============================================================
-
+# DDC 10개 주류 정의
 DDC_CLASSES = {
-    0: {
-        "name": "Computer Science, Information & General Works",
-        "name_ko": "총류 (컴퓨터, 정보)",
-        "color": "#8dd3c7",  # 민트
-        "keywords": [
-            "computer science", "programming", "software", "data science",
-            "information technology", "artificial intelligence", "machine learning",
-            "algorithms", "database", "internet", "web development",
-            "encyclopedia", "library science", "journalism", "news media",
-            "general knowledge", "reference", "bibliography"
-        ],
-        "examples": [
-            "Introduction to Computer Science and Programming",
-            "Data Structures and Algorithms",
-            "Machine Learning: A Probabilistic Perspective",
-            "The Art of Computer Programming",
-            "Encyclopedia Britannica",
-            "Information Architecture for the Web"
-        ]
-    },
-    1: {
-        "name": "Philosophy & Psychology",
-        "name_ko": "철학, 심리학",
-        "color": "#ffffb3",  # 연노랑
-        "keywords": [
-            "philosophy", "ethics", "logic", "metaphysics", "epistemology",
-            "psychology", "psychoanalysis", "cognitive science", "consciousness",
-            "mind", "behavior", "mental health", "therapy", "counseling",
-            "self-help", "personal development", "motivation", "happiness",
-            "stoicism", "existentialism", "phenomenology"
-        ],
-        "examples": [
-            "Meditations by Marcus Aurelius",
-            "Thinking, Fast and Slow",
-            "The Interpretation of Dreams by Freud",
-            "Man's Search for Meaning",
-            "The Republic by Plato",
-            "Cognitive Psychology: A Student's Handbook"
-        ]
-    },
-    2: {
-        "name": "Religion",
-        "name_ko": "종교",
-        "color": "#bebada",  # 연보라
-        "keywords": [
-            "religion", "theology", "bible", "christianity", "islam", "buddhism",
-            "hinduism", "judaism", "spirituality", "faith", "god", "prayer",
-            "church", "mosque", "temple", "scripture", "sacred", "divine",
-            "meditation", "zen", "mysticism", "afterlife", "soul"
-        ],
-        "examples": [
-            "The Bible",
-            "The Quran",
-            "Mere Christianity by C.S. Lewis",
-            "The Power of Now: A Guide to Spiritual Enlightenment",
-            "Siddhartha by Hermann Hesse",
-            "The Bhagavad Gita"
-        ]
-    },
-    3: {
-        "name": "Social Sciences",
-        "name_ko": "사회과학",
-        "color": "#fb8072",  # 연빨강/코랄
-        "keywords": [
-            "sociology", "economics", "politics", "government", "law",
-            "education", "commerce", "business", "management", "finance",
-            "anthropology", "social issues", "poverty", "inequality",
-            "democracy", "capitalism", "socialism", "policy", "statistics",
-            "criminology", "welfare", "globalization", "trade"
-        ],
-        "examples": [
-            "Capital in the Twenty-First Century",
-            "Freakonomics",
-            "The Wealth of Nations by Adam Smith",
-            "Sapiens: A Brief History of Humankind",
-            "Thinking Like an Economist",
-            "Introduction to Political Science"
-        ]
-    },
-    4: {
-        "name": "Language",
-        "name_ko": "언어",
-        "color": "#80b1d3",  # 연파랑
-        "keywords": [
-            "language", "linguistics", "grammar", "vocabulary", "dictionary",
-            "translation", "etymology", "phonetics", "syntax", "semantics",
-            "english", "spanish", "french", "german", "chinese", "japanese",
-            "language learning", "writing skills", "communication", "rhetoric"
-        ],
-        "examples": [
-            "The Elements of Style",
-            "English Grammar in Use",
-            "The Language Instinct by Steven Pinker",
-            "Fluent Forever: How to Learn Any Language",
-            "Oxford English Dictionary",
-            "Introduction to Linguistics"
-        ]
-    },
-    5: {
-        "name": "Science",
-        "name_ko": "자연과학",
-        "color": "#fdb462",  # 연주황
-        "keywords": [
-            "science", "physics", "chemistry", "biology", "mathematics",
-            "astronomy", "geology", "ecology", "evolution", "genetics",
-            "quantum", "relativity", "atom", "molecule", "cell", "organism",
-            "experiment", "theory", "hypothesis", "scientific method",
-            "nature", "universe", "cosmos", "planet", "species"
-        ],
-        "examples": [
-            "A Brief History of Time by Stephen Hawking",
-            "The Origin of Species by Charles Darwin",
-            "Cosmos by Carl Sagan",
-            "The Selfish Gene by Richard Dawkins",
-            "Principles of Physics",
-            "Organic Chemistry Textbook"
-        ]
-    },
-    6: {
-        "name": "Technology & Applied Sciences",
-        "name_ko": "기술, 응용과학",
-        "color": "#b3de69",  # 연두
-        "keywords": [
-            "technology", "engineering", "medicine", "health", "agriculture",
-            "cooking", "manufacturing", "construction", "electronics",
-            "mechanical", "chemical engineering", "biotechnology",
-            "nutrition", "diet", "fitness", "disease", "surgery", "nursing",
-            "architecture", "design", "invention", "innovation"
-        ],
-        "examples": [
-            "The Design of Everyday Things",
-            "How to Cook Everything",
-            "Gray's Anatomy",
-            "Engineering Mechanics",
-            "The Innovator's Dilemma",
-            "Introduction to Robotics"
-        ]
-    },
-    7: {
-        "name": "Arts & Recreation",
-        "name_ko": "예술, 오락",
-        "color": "#fccde5",  # 연분홍
-        "keywords": [
-            "art", "music", "painting", "sculpture", "photography", "film",
-            "theater", "dance", "architecture", "design", "fashion",
-            "sports", "games", "hobbies", "crafts", "gardening",
-            "entertainment", "performance", "aesthetic", "beauty",
-            "drawing", "illustration", "animation", "cinema"
-        ],
-        "examples": [
-            "The Story of Art by E.H. Gombrich",
-            "Ways of Seeing by John Berger",
-            "Understanding Comics by Scott McCloud",
-            "The Art Spirit",
-            "A History of Western Music",
-            "The Game: Penetrating the Secret Society of Pickup Artists"
-        ]
-    },
-    8: {
-        "name": "Literature",
-        "name_ko": "문학",
-        "color": "#d9d9d9",  # 연회색
-        "keywords": [
-            "fiction", "novel", "poetry", "drama", "short story", "essay",
-            "literary", "narrative", "prose", "verse", "author", "writer",
-            "classic", "contemporary", "romance", "mystery", "thriller",
-            "fantasy", "science fiction", "horror", "adventure",
-            "literary criticism", "rhetoric", "creative writing"
-        ],
-        "examples": [
-            "Pride and Prejudice by Jane Austen",
-            "1984 by George Orwell",
-            "To Kill a Mockingbird",
-            "The Great Gatsby",
-            "Harry Potter Series",
-            "The Lord of the Rings"
-        ]
-    },
-    9: {
-        "name": "History & Geography",
-        "name_ko": "역사, 지리",
-        "color": "#bc80bd",  # 연자주
-        "keywords": [
-            "history", "geography", "biography", "civilization", "war",
-            "ancient", "medieval", "modern", "century", "empire", "kingdom",
-            "revolution", "world war", "colonialism", "archaeology",
-            "travel", "exploration", "maps", "countries", "continents",
-            "culture", "heritage", "tradition", "memoir", "autobiography"
-        ],
-        "examples": [
-            "Guns, Germs, and Steel by Jared Diamond",
-            "A People's History of the United States",
-            "The Diary of a Young Girl by Anne Frank",
-            "The Rise and Fall of the Third Reich",
-            "Longitude: The True Story",
-            "Into the Wild by Jon Krakauer"
-        ]
-    }
+    0: {"name": "총류 (컴퓨터, 정보)", "name_ko": "총류 (컴퓨터, 정보)",
+        "keywords": "computer science, information, encyclopedia, library, journalism, publishing"},
+    1: {"name": "철학, 심리학", "name_ko": "철학, 심리학",
+        "keywords": "philosophy, psychology, ethics, logic, metaphysics, epistemology, mind, consciousness"},
+    2: {"name": "종교", "name_ko": "종교",
+        "keywords": "religion, bible, christianity, islam, buddhism, hinduism, spirituality, theology"},
+    3: {"name": "사회과학", "name_ko": "사회과학",
+        "keywords": "sociology, politics, economics, law, education, government, commerce, social issues"},
+    4: {"name": "언어", "name_ko": "언어",
+        "keywords": "language, linguistics, grammar, dictionary, english, french, german, spanish"},
+    5: {"name": "자연과학", "name_ko": "자연과학",
+        "keywords": "science, mathematics, physics, chemistry, biology, astronomy, geology, nature"},
+    6: {"name": "기술, 응용과학", "name_ko": "기술, 응용과학",
+        "keywords": "technology, medicine, engineering, agriculture, cooking, business, health, medical"},
+    7: {"name": "예술, 오락", "name_ko": "예술, 오락",
+        "keywords": "art, music, sports, games, entertainment, painting, sculpture, photography, film"},
+    8: {"name": "문학", "name_ko": "문학",
+        "keywords": "literature, fiction, poetry, drama, novel, story, prose, literary criticism"},
+    9: {"name": "역사, 지리", "name_ko": "역사, 지리",
+        "keywords": "history, geography, biography, travel, archaeology, ancient, world war, civilization"},
 }
-
-# Unknown 카테고리
-DDC_UNKNOWN = 10
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Assign DDC classes using embedding similarity")
-    p.add_argument("--snippet_json", required=True, help="Path to id2snippet JSON file")
-    p.add_argument("--ids_file", required=True, help="Path to ids .uint32 file")
+    p = argparse.ArgumentParser(description="Assign DDC classes to book embeddings")
+    p.add_argument("--embeddings_npy", required=True, help="Book embeddings .npy file")
+    p.add_argument("--emb_ids_npy", required=True, help="Embedding IDs .npy file")
+    p.add_argument("--packed_ids_npy", required=True, help="Packed IDs .npy file (target order)")
     p.add_argument("--out_dir", required=True, help="Output directory")
-    p.add_argument("--tag", default="", help="Output filename tag")
-    p.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
-    p.add_argument("--batch_size", type=int, default=64)
-    p.add_argument("--device", default="cuda", help="cuda or cpu")
-    p.add_argument("--top_k", type=int, default=1, help="Use top-k similar DDC classes (1=best only)")
-    p.add_argument("--confidence_threshold", type=float, default=0.0, 
-                   help="Minimum similarity score, below this → unknown (10)")
-    return p.parse_args()
-
-
-def build_ddc_texts():
-    """
-    DDC별 대표 텍스트 생성
-    키워드 + 예시를 조합하여 각 DDC를 대표하는 텍스트 만들기
-    """
-    ddc_texts = {}
-    for ddc_id, info in DDC_CLASSES.items():
-        # 키워드와 예시를 조합
-        keywords_text = ", ".join(info["keywords"])
-        examples_text = ". ".join(info["examples"])
-        
-        # 여러 버전의 대표 텍스트 생성 (다양성을 위해)
-        texts = [
-            f"{info['name']}. Topics include: {keywords_text}",
-            f"Books about {keywords_text}",
-            examples_text,
-        ]
-        ddc_texts[ddc_id] = texts
+    p.add_argument("--tag", required=True, help="Output tag")
     
-    return ddc_texts
+    p.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
+    p.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
+    p.add_argument("--confidence_threshold", type=float, default=0.1,
+                   help="Minimum similarity score to assign a DDC class")
+    
+    # 강제 할당 옵션
+    p.add_argument("--force_assign", action="store_true",
+                   help="Force assign all points to DDC (no Unknown)")
+    
+    p.add_argument("--patch_pack_meta", action="store_true",
+                   help="Patch pack_meta JSON with DDC file paths")
+    
+    # memmap shape 파라미터
+    p.add_argument("--n_records", type=int, default=500000, help="Number of records in embeddings")
+    p.add_argument("--emb_dim", type=int, default=384, help="Embedding dimension")
+    
+    return p.parse_args()
 
 
 def main():
     args = parse_args()
-    
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    # 출력 파일 경로
-    tag = f"_{args.tag}" if args.tag else ""
-    ddc_out_path = out_dir / f"ddc{tag}.uint16"
-    ddc_meta_path = out_dir / f"ddc_meta{tag}.json"
+    # 1. 임베딩 로드 (memmap)
+    embeddings = np.memmap(args.embeddings_npy, dtype="float32", mode="r", shape=(args.n_records, args.emb_dim))
+    emb_ids = np.memmap(args.emb_ids_npy, dtype="int64", mode="r", shape=(args.n_records,))
+    packed_ids = np.load(args.packed_ids_npy)
     
-    print(f"Loading snippet JSON: {args.snippet_json}")
-    with open(args.snippet_json, "r", encoding="utf-8") as f:
-        id2snippet = json.load(f)
+    print(f"Embeddings: {embeddings.shape} dtype={embeddings.dtype}")
+    print(f"emb_ids: {emb_ids.shape} dtype={emb_ids.dtype}")
+    print(f"packed_ids: {packed_ids.shape} dtype={packed_ids.dtype}")
     
-    print(f"Loading IDs: {args.ids_file}")
-    ids = np.fromfile(args.ids_file, dtype=np.uint32)
-    n = len(ids)
-    print(f"  → {n} points")
+    n = len(packed_ids)
+    emb_dim = embeddings.shape[1]
     
-    # 각 ID에 대한 텍스트 추출
-    texts = []
-    valid_mask = []
-    for book_id in ids:
-        snippet = id2snippet.get(str(book_id), "")
-        texts.append(snippet if snippet else "")
-        valid_mask.append(bool(snippet))
+    # ID -> index 매핑
+    emb_id_to_idx = {int(eid): i for i, eid in enumerate(emb_ids)}
     
-    print(f"  → {sum(valid_mask)} / {n} have valid text")
-    
-    # 모델 로드
-    print(f"\nLoading model: {args.model}")
-    from sentence_transformers import SentenceTransformer
+    # 2. 모델 로드
+    print(f"Loading model: {args.model} ({args.device})")
     model = SentenceTransformer(args.model, device=args.device)
     
-    # DDC 대표 텍스트 임베딩
-    print("\nEmbedding DDC representative texts...")
-    ddc_texts = build_ddc_texts()
+    # 3. DDC 프로토타입 임베딩 생성
+    from tqdm import tqdm
     
-    ddc_embeddings = {}  # ddc_id -> averaged embedding
-    for ddc_id, text_list in tqdm(ddc_texts.items(), desc="DDC classes"):
-        embs = model.encode(text_list, convert_to_numpy=True, normalize_embeddings=True)
-        # 평균 임베딩
-        ddc_embeddings[ddc_id] = embs.mean(axis=0)
+    ddc_texts = [DDC_CLASSES[i]["keywords"] for i in range(10)]
+    ddc_embeddings = []
     
-    # DDC 임베딩을 행렬로 변환 (10 x dim)
-    ddc_ids_ordered = sorted(ddc_embeddings.keys())
-    ddc_matrix = np.stack([ddc_embeddings[i] for i in ddc_ids_ordered])  # (10, dim)
+    for text in tqdm(ddc_texts, desc="Embedding DDC prototypes"):
+        emb = model.encode(text, convert_to_numpy=True)
+        ddc_embeddings.append(emb)
     
-    # 책 텍스트 임베딩
-    print(f"\nEmbedding {n} book texts...")
-    book_embeddings = model.encode(
-        texts, 
-        batch_size=args.batch_size,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=True
-    )  # (n, dim)
+    ddc_embeddings = np.array(ddc_embeddings, dtype=np.float32)  # (10, dim)
     
-    # 코사인 유사도 계산 (정규화된 벡터이므로 내적 = 코사인 유사도)
-    print("\nComputing similarities...")
-    similarities = book_embeddings @ ddc_matrix.T  # (n, 10)
+    # 정규화
+    ddc_norms = np.linalg.norm(ddc_embeddings, axis=1, keepdims=True)
+    ddc_embeddings = ddc_embeddings / (ddc_norms + 1e-8)
     
-    # 가장 유사한 DDC 할당
-    best_ddc = similarities.argmax(axis=1)  # (n,)
-    best_scores = similarities.max(axis=1)  # (n,)
+    # 4. 각 책에 DDC 할당
+    ddc_assignments = np.zeros(n, dtype=np.uint16)
+    scores_list = []
     
-    # 신뢰도 낮으면 unknown
-    ddc_assignments = np.where(
-        best_scores >= args.confidence_threshold,
-        best_ddc,
-        DDC_UNKNOWN
-    ).astype(np.uint16)
+    for i, pid in enumerate(tqdm(packed_ids, desc="Assigning DDC")):
+        pid = int(pid)
+        idx = emb_id_to_idx.get(pid, -1)
+        
+        if idx < 0:
+            # 임베딩 없음 → Unknown
+            ddc_assignments[i] = 10
+            scores_list.append(-1.0)
+            continue
+        
+        # 코사인 유사도 계산
+        book_emb = embeddings[idx]
+        book_norm = np.linalg.norm(book_emb)
+        if book_norm < 1e-8:
+            ddc_assignments[i] = 10
+            scores_list.append(-1.0)
+            continue
+        
+        book_emb = book_emb / book_norm
+        similarities = ddc_embeddings @ book_emb  # (10,)
+        
+        best_ddc = int(np.argmax(similarities))
+        best_score = float(similarities[best_ddc])
+        
+        # 강제 할당 모드: threshold 무시
+        if args.force_assign:
+            ddc_assignments[i] = best_ddc
+        else:
+            # threshold 적용
+            if best_score >= args.confidence_threshold:
+                ddc_assignments[i] = best_ddc
+            else:
+                ddc_assignments[i] = 10  # Unknown
+        
+        scores_list.append(best_score)
     
-    # 통계 출력
-    print("\n" + "=" * 50)
+    scores_arr = np.array(scores_list)
+    
+    # 5. 통계 출력
+    print("=" * 50)
     print("DDC Assignment Statistics")
     print("=" * 50)
     
-    for ddc_id in range(11):
-        count = (ddc_assignments == ddc_id).sum()
-        pct = count / n * 100
-        if ddc_id < 10:
-            name = DDC_CLASSES[ddc_id]["name_ko"]
+    for i in range(11):
+        count = (ddc_assignments == i).sum()
+        pct = 100 * count / n
+        if i < 10:
+            name = DDC_CLASSES[i]["name_ko"]
+            print(f"  {i}: {name:20s} | {count:7d} ({pct:5.1f}%)")
         else:
-            name = "Unknown"
-        print(f"  {ddc_id}: {name:20s} | {count:5d} ({pct:5.1f}%)")
+            print(f"  {i}: {'Unknown':20s} | {count:7d} ({pct:5.1f}%)")
     
-    # 점수 분포
-    print(f"\nSimilarity scores: min={best_scores.min():.3f}, max={best_scores.max():.3f}, mean={best_scores.mean():.3f}")
+    valid_scores = scores_arr[scores_arr >= 0]
+    if len(valid_scores) > 0:
+        print(f"Scores: min={valid_scores.min():.3f}, max={valid_scores.max():.3f}, mean={valid_scores.mean():.3f}")
     
-    # 저장
-    print(f"\nSaving DDC assignments to: {ddc_out_path}")
-    ddc_assignments.tofile(ddc_out_path)
+    # 6. 저장
+    out_ddc = out_dir / f"ddc_{args.tag}.uint16"
+    ddc_assignments.tofile(out_ddc)
     
-    # 메타데이터 저장
+    out_meta = out_dir / f"ddc_meta_{args.tag}.json"
     meta = {
-        "n": n,
+        "num_classes": 10,
+        "unknown_id": 10,
+        "threshold": args.confidence_threshold if not args.force_assign else None,
+        "force_assign": args.force_assign,
         "model": args.model,
-        "num_classes": 11,
         "classes": {
-            str(k): {
-                "name": v["name"],
-                "name_ko": v["name_ko"],
-                "color": v["color"]
-            } for k, v in DDC_CLASSES.items()
+            str(i): {
+                "name": DDC_CLASSES[i]["name"],
+                "name_ko": DDC_CLASSES[i]["name_ko"],
+                "count": int((ddc_assignments == i).sum()),
+            }
+            for i in range(10)
         },
-        "unknown_class": DDC_UNKNOWN,
-        "files": {
-            "ddc": str(ddc_out_path)
-        }
+        "unknown_count": int((ddc_assignments == 10).sum()),
     }
-    meta["classes"]["10"] = {
-        "name": "Unknown",
-        "name_ko": "미분류",
-        "color": "#969696"
-    }
+    out_meta.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     
-    print(f"Saving metadata to: {ddc_meta_path}")
-    with open(ddc_meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2, ensure_ascii=False)
+    print(f"Saved:")
+    print(f" - {out_ddc}")
+    print(f" - {out_meta}")
     
-    print("\nDone!")
+    # 7. pack_meta 패치
+    if args.patch_pack_meta:
+        pack_meta_path = out_dir / f"pack_meta_{args.tag}.json"
+        if pack_meta_path.exists():
+            pack_meta = json.loads(pack_meta_path.read_text(encoding="utf-8"))
+            pack_meta.setdefault("files", {})
+            pack_meta["files"]["ddc"] = str(out_ddc.resolve())
+            pack_meta["files"]["ddc_meta"] = str(out_meta.resolve())
+            pack_meta_path.write_text(json.dumps(pack_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[patch] updated: {pack_meta_path}")
 
 
 if __name__ == "__main__":

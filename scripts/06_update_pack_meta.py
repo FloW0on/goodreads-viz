@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+#클러스터링 후에 실행하는 코드
 import argparse
 import json
 from pathlib import Path

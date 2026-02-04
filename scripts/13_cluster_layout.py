@@ -1,18 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-클러스터 기반 원형 레이아웃 생성
-
-기존 UMAP 좌표와 클러스터 라벨을 사용해서
-각 클러스터가 시각적으로 분리된 원형 그룹으로 보이도록 재배치
-
-사용법:
-    python 13_cluster_layout.py \
-        --umap ./umap2d.parquet \
-        --cluster ./cluster.uint16 \
-        --out_dir ./web/public/packed \
-        --tag n10000_seed42
-"""
 
 import argparse
 import json
@@ -23,210 +10,218 @@ import pandas as pd
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Create cluster-based circular layout")
+    p = argparse.ArgumentParser(description="Create cluster-based circular layout (packed-order safe)")
     p.add_argument("--umap", required=True, help="UMAP parquet with columns: id, x, y")
-    p.add_argument("--cluster", required=True, help="Cluster labels .uint16 file")
-    p.add_argument("--out_dir", required=True, help="Output directory")
+    p.add_argument("--cluster", required=True, help="Cluster labels .uint16 file (packed order)")
+    p.add_argument("--packed_ids_npy", required=True, help="Packed ids .npy (point order)")
+    p.add_argument("--out_dir", required=True, help="Output directory (packed)")
     p.add_argument("--tag", required=True, help="Output tag")
-    p.add_argument("--cluster_radius", type=float, default=1.0, 
-                   help="Radius of each cluster circle")
-    p.add_argument("--layout_radius", type=float, default=3.0,
-                   help="Radius of the overall layout (distance from center to cluster centers)")
-    p.add_argument("--noise_center", action="store_true",
-                   help="Place noise cluster at center (default: on the ring)")
-    p.add_argument("--preserve_internal", action="store_true",
-                   help="Preserve relative positions within each cluster")
+
+    p.add_argument("--cluster_radius", type=float, default=1.0, help="Base radius of each cluster circle")
+    p.add_argument("--layout_radius", type=float, default=3.0, help="Radius of ring for cluster centers")
+    p.add_argument("--noise_center", action="store_true", help="Place noise bucket at center")
+    p.add_argument("--preserve_internal", action="store_true", help="Preserve relative positions within each cluster")
+
+    # optional integration
+    p.add_argument("--patch_pack_meta", action="store_true",
+                   help="Patch pack_meta_<tag>.json to include layout file path")
+
     return p.parse_args()
 
-
-def normalize_to_circle(points, radius=1.0):
+def preserve_internal_layout(points_xy: np.ndarray, center: np.ndarray, radius: float) -> np.ndarray:
     """
-    포인트들을 원 안에 균등하게 배치
+    Preserve cluster internal geometry by min-max normalizing each axis to [-1,1],
+    then scaling into radius (with margin), then translating to center.
     """
-    n = len(points)
+    n = points_xy.shape[0]
     if n == 0:
-        return np.array([]).reshape(0, 2)
-    
+        return np.zeros((0, 2), dtype=np.float32)
     if n == 1:
-        return np.array([[0.0, 0.0]])
-    
-    # Sunflower 패턴으로 원 안에 균등 배치
-    indices = np.arange(n) + 0.5
-    r = radius * np.sqrt(indices / n)
-    theta = np.pi * (1 + np.sqrt(5)) * indices  # Golden angle
-    
-    x = r * np.cos(theta)
-    y = r * np.sin(theta)
-    
-    return np.column_stack([x, y])
+        return center.reshape(1, 2).astype(np.float32)
 
-
-def preserve_internal_layout(points, center, radius):
-    """
-    클러스터 내 상대적 위치를 유지하면서 원 안에 맞춤
-    """
-    if len(points) == 0:
-        return np.array([]).reshape(0, 2)
-    
-    if len(points) == 1:
-        return np.array([center])
-    
-    # 현재 범위 계산
-    min_xy = points.min(axis=0)
-    max_xy = points.max(axis=0)
+    min_xy = points_xy.min(axis=0)
+    max_xy = points_xy.max(axis=0)
     range_xy = max_xy - min_xy
-    
-    # 0으로 나누기 방지
-    range_xy = np.where(range_xy == 0, 1, range_xy)
-    
-    # 정규화 (-1 ~ 1)
-    normalized = 2 * (points - min_xy) / range_xy - 1
-    
-    # 반지름에 맞게 스케일
-    scaled = normalized * radius * 0.8  # 0.8로 여백
-    
-    # 중심 이동
-    return scaled + center
+    range_xy = np.where(range_xy == 0, 1.0, range_xy)
+
+    normalized = 2.0 * (points_xy - min_xy) / range_xy - 1.0  # [-1,1]
+    scaled = normalized * (radius * 0.8)  # leave margin
+    out = scaled + center.reshape(1, 2)
+    return out.astype(np.float32)
+
+
+def patch_pack_meta(out_dir: Path, tag: str, layout_xy_path: Path, layout_meta_path: Path):
+    meta_path = out_dir / f"pack_meta_{tag}.json"
+    if not meta_path.exists():
+        print("[patch] pack_meta not found:", meta_path)
+        return
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.setdefault("files", {})
+    meta["files"]["points_xy_layout"] = str(layout_xy_path.resolve())
+    meta["files"]["layout_meta"] = str(layout_meta_path.resolve())
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("[patch] updated:", meta_path)
 
 
 def main():
     args = parse_args()
-    
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 데이터 로드
+
+    # 1) Load packed ids (point order)
+    packed_ids = np.load(args.packed_ids_npy)
+    if packed_ids.ndim != 1:
+        packed_ids = packed_ids.reshape(-1)
+    packed_ids = packed_ids.astype(np.int64, copy=False)
+    n = int(packed_ids.shape[0])
+
+    # 2) Load UMAP parquet and align to packed order
     print(f"Loading UMAP: {args.umap}")
-    df = pd.read_parquet(args.umap)
-    
+    dfu = pd.read_parquet(args.umap)
+    need = {"id", "x", "y"}
+    if not need.issubset(dfu.columns):
+        raise ValueError(f"UMAP parquet must contain columns {sorted(need)}; got {dfu.columns.tolist()}")
+
+    dfu = dfu[["id", "x", "y"]].copy()
+    dfu["id"] = dfu["id"].astype(np.int64)
+
+    if dfu.shape[0] != n:
+        raise ValueError(f"UMAP rows ({dfu.shape[0]}) != packed_ids length ({n}). "
+                         f"Use the same tag/run outputs.")
+
+    # fast id->row mapping
+    id_to_row = {int(bid): i for i, bid in enumerate(dfu["id"].to_list())}
+
+    rows = np.empty(n, dtype=np.int64)
+    missing = 0
+    for i, bid in enumerate(packed_ids.tolist()):
+        r = id_to_row.get(int(bid), -1)
+        if r < 0:
+            missing += 1
+        rows[i] = r
+    if missing:
+        ex = [int(bid) for bid, r in zip(packed_ids[:2000].tolist(), rows[:2000].tolist()) if r < 0][:10]
+        raise KeyError(f"Missing {missing} packed ids in UMAP parquet. Examples: {ex}")
+
+    original_xy = dfu.loc[rows, ["x", "y"]].to_numpy(dtype=np.float32)  # packed order
+    ids_in_order = packed_ids  # packed order
+
+    # 3) Load cluster labels (must be packed order)
     print(f"Loading clusters: {args.cluster}")
     clusters = np.fromfile(args.cluster, dtype=np.uint16)
-    
-    n = len(df)
-    if len(clusters) != n:
-        raise ValueError(f"Mismatch: UMAP has {n} points, clusters has {len(clusters)}")
-    
-    print(f"Points: {n}")
-    
-    # 클러스터 정보
+    if clusters.shape[0] != n:
+        raise ValueError(f"Mismatch: packed_ids has {n} points, clusters has {clusters.shape[0]}")
+
     unique_clusters = np.unique(clusters)
-    num_clusters = len(unique_clusters)
-    print(f"Clusters: {unique_clusters.tolist()}")
-    
-    # 클러스터별 크기 계산 (레이아웃 배치용)
-    cluster_sizes = {c: (clusters == c).sum() for c in unique_clusters}
+    print(f"Points: {n}")
+    print(f"Unique cluster ids: {unique_clusters.tolist()}")
+
+    # cluster sizes
+    cluster_sizes = {int(c): int((clusters == c).sum()) for c in unique_clusters}
+    total_points = int(sum(cluster_sizes.values()))
     print("Cluster sizes:", cluster_sizes)
-    
-    # 클러스터 중심 위치 계산 (원형 배치)
-    # 크기가 큰 클러스터일수록 반지름도 크게
-    total_points = sum(cluster_sizes.values())
-    
+
+    # 4) Decide noise bucket (by convention: max id)
+    noise_cluster = int(unique_clusters.max())
+    non_noise = [int(c) for c in unique_clusters.tolist() if int(c) != noise_cluster]
+    num_main = len(non_noise)
+
+    # 5) Assign cluster centers from original UMAP centroids (NO RING)
     cluster_centers = {}
     cluster_radii = {}
-    
-    # noise 클러스터 (보통 마지막)
-    noise_cluster = max(unique_clusters)
-    non_noise_clusters = [c for c in unique_clusters if c != noise_cluster]
-    
-    # 클러스터 중심을 원형으로 배치
-    num_main_clusters = len(non_noise_clusters)
-    
-    for i, c in enumerate(non_noise_clusters):
-        angle = 2 * np.pi * i / max(num_main_clusters, 1)
-        cx = args.layout_radius * np.cos(angle)
-        cy = args.layout_radius * np.sin(angle)
-        cluster_centers[c] = np.array([cx, cy])
-        
-        # 클러스터 크기에 비례한 반지름
-        size_ratio = cluster_sizes[c] / total_points
-        cluster_radii[c] = args.cluster_radius * (0.5 + size_ratio * 2)
-    
-    # noise 클러스터
+
+    # radii는 클러스터 크기에 비례 (겹침 방지용)
+    for c in non_noise:
+        idx = np.where(clusters == c)[0]
+        center = original_xy[idx].mean(axis=0).astype(np.float32) 
+        cluster_centers[int(c)] = center
+
+        size_ratio = cluster_sizes[int(c)] / max(total_points, 1)
+        cluster_radii[int(c)] = float(args.cluster_radius * (0.5 + size_ratio * 2.0))
+
+    # noise center placement
     if args.noise_center:
-        cluster_centers[noise_cluster] = np.array([0.0, 0.0])
+        cluster_centers[int(noise_cluster)] = np.array([0.0, 0.0], dtype=np.float32)
     else:
-        # 원형 배치의 마지막에 추가
-        angle = 2 * np.pi * num_main_clusters / max(num_main_clusters + 1, 1)
-        cluster_centers[noise_cluster] = np.array([
-            args.layout_radius * np.cos(angle),
-            args.layout_radius * np.sin(angle)
-        ])
-    cluster_radii[noise_cluster] = args.cluster_radius * 0.5
-    
-    print("\nCluster centers:")
-    for c in unique_clusters:
-        print(f"  {c}: center={cluster_centers[c]}, radius={cluster_radii[c]:.2f}")
-    
-    # 새로운 좌표 생성
+        # noise도 centroid 기반으로
+        idx = np.where(clusters == noise_cluster)[0]
+        cluster_centers[int(noise_cluster)] = original_xy[idx].mean(axis=0).astype(np.float32)
+
+    cluster_radii[int(noise_cluster)] = float(args.cluster_radius * 0.5)
+
+    # small repulsion between cluster centers to reduce overlap
+    PUSH = 0.15 
+
+    main = [int(c) for c in non_noise]
+    for i in range(len(main)):
+        for j in range(i + 1, len(main)):
+            c1, c2 = main[i], main[j]
+            v = cluster_centers[c1] - cluster_centers[c2]
+            d = float(np.linalg.norm(v))
+            if d < 1e-6:
+                continue
+            shift = (PUSH / d) * v.astype(np.float32)
+            cluster_centers[c1] += shift
+            cluster_centers[c2] -= shift
+
+    # 6) Build new XY (packed order)
     new_xy = np.zeros((n, 2), dtype=np.float32)
-    
-    original_xy = df[["x", "y"]].to_numpy()
-    
-    for c in unique_clusters:
-        mask = clusters == c
-        indices = np.where(mask)[0]
-        
+
+    for c in unique_clusters.tolist():
+        c = int(c)
+        idx = np.where(clusters == c)[0]
         center = cluster_centers[c]
         radius = cluster_radii[c]
-        
-        if args.preserve_internal:
-            # 클러스터 내 상대적 위치 유지
-            cluster_points = original_xy[mask]
-            new_points = preserve_internal_layout(cluster_points, center, radius)
-        else:
-            # Sunflower 패턴으로 균등 배치
-            new_points = normalize_to_circle(indices, radius) + center
-        
-        new_xy[indices] = new_points
-    
-    # 결과 저장
-    df_out = pd.DataFrame({
-        "id": df["id"].values,
-        "x": new_xy[:, 0],
-        "y": new_xy[:, 1],
-    })
-    
+
+        pts = original_xy[idx]
+        new_pts = preserve_internal_layout(pts, center, radius)
+        new_xy[idx] = new_pts
+
+    # 7) Save outputs
     out_parquet = out_dir / f"layout_{args.tag}.parquet"
+    df_out = pd.DataFrame({"id": ids_in_order.astype(np.int64), "x": new_xy[:, 0], "y": new_xy[:, 1]})
     df_out.to_parquet(out_parquet, index=False)
-    print(f"\nSaved: {out_parquet}")
-    
-    # Binary 포맷도 저장 (웹용)
+
     out_xy = out_dir / f"points_xy_{args.tag}_layout.f32"
     new_xy.astype(np.float32).tofile(out_xy)
-    print(f"Saved: {out_xy}")
-    
-    out_ids = out_dir / f"ids_{args.tag}_layout.uint32"
-    df["id"].to_numpy().astype(np.uint32).tofile(out_ids)
-    print(f"Saved: {out_ids}")
-    
-    # 메타데이터
+
+    out_meta = out_dir / f"layout_{args.tag}.json"
     meta = {
         "tag": args.tag,
         "n": int(n),
         "layout": "cluster_circular",
         "params": {
-            "cluster_radius": args.cluster_radius,
-            "layout_radius": args.layout_radius,
-            "preserve_internal": args.preserve_internal,
+            "cluster_radius": float(args.cluster_radius),
+            "layout_radius": float(args.layout_radius),
+            "noise_center": bool(args.noise_center),
+            "preserve_internal": bool(args.preserve_internal),
         },
+        "noise_cluster": int(noise_cluster),
         "cluster_info": {
-            str(c): {
-                "center": cluster_centers[c].tolist(),
-                "radius": float(cluster_radii[c]),
-                "size": int(cluster_sizes[c]),
+            str(int(c)): {
+                "center": cluster_centers[int(c)].tolist(),
+                "radius": float(cluster_radii[int(c)]),
+                "size": int(cluster_sizes[int(c)]),
             }
-            for c in unique_clusters
+            for c in unique_clusters.tolist()
         },
         "files": {
-            "points_xy": str(out_xy),
-            "ids": str(out_ids),
-        }
+            "layout_parquet": str(out_parquet.resolve()),
+            "points_xy_layout": str(out_xy.resolve()),
+            "packed_ids_npy": str(Path(args.packed_ids_npy).resolve()),
+            "cluster_uint16": str(Path(args.cluster).resolve()),
+        },
     }
-    
-    out_meta = out_dir / f"layout_{args.tag}.json"
-    out_meta.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"Saved: {out_meta}")
-    
+    out_meta.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("\nSaved:")
+    print(" -", out_parquet)
+    print(" -", out_xy)
+    print(" -", out_meta)
+
+    if args.patch_pack_meta:
+        patch_pack_meta(out_dir, args.tag, out_xy, out_meta)
+
     print("\nDone!")
 
 

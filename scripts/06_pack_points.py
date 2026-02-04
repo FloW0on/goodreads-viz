@@ -68,6 +68,10 @@ def main():
 
     points_bin = out_dir / f"points_xy{tag}.f32"
     ids_bin = out_dir / f"ids{tag}.{ids_dtype}"
+
+    npy_ids = out_dir / f"ids{tag}.npy"
+    np.save(npy_ids, ids.astype(np.uint32 if args.id_dtype=="uint32" else np.int64))
+
     debug_parquet = out_dir / f"points_debug{tag}.parquet"
     meta_json = out_dir / f"pack_meta{tag}.json"
 
@@ -100,9 +104,9 @@ def main():
     print("Saved:")
     print(" -", points_bin, f"({points.nbytes/1024/1024:.2f} MiB)")
     print(" -", ids_bin, f"({ids.nbytes/1024/1024:.2f} MiB)")
+    print(" -", npy_ids, f"({ids.nbytes/1024/1024:.2f} MiB)")
     print(" -", debug_parquet)
     print(" -", meta_json)
-
 
 if __name__ == "__main__":
     main()
