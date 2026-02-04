@@ -16,11 +16,12 @@ struct U {
   searchActive: i32,    // 0/1
   searchOnly: i32,      // 1=only matched, 0=dim others
 
-  dimAlpha: f32,        // non-selected alpha multiplier
-  searchDimAlpha: f32,  // non-matched alpha multiplier
+  dimAlpha: f32,      // non-selected alpha multiplier
+  searchDimAlpha: f32, // non-matched alpha multiplier
 
-  selectedDdc: i32,     // -1 = none (DDC 필터용)
+  selectedDdc: i32,   // -1 = none (DDC 필터용)
   _pad1: f32,
+  searchBoost: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -54,6 +55,7 @@ struct VSOut {
   @location(2) @interpolate(flat) clusterId: u32, // 클러스터 ID
   @location(3) @interpolate(flat) searchHit: u32, // 검색 매칭
   @location(4) local: vec2<f32>,
+  @location(5) @interpolate(flat) iid: u32, // picking id (instance index)
 };
 
 @vertex
@@ -65,8 +67,15 @@ fn vs(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> VSOut {
   let y = p.y * u.scale + u.ty;
 
   let c = corner(v % 6u);
-  let dx = c.x * (u.pointSizePx * 0.5) * u.invW2;
-  let dy = c.y * (u.pointSizePx * 0.5) * u.invH2;
+  // 검색 매칭이면 점 크기 boost (vertex 단계)
+  let hit = searchMask[i];
+  var ps = u.pointSizePx;
+  if (u.searchActive != 0 && hit != 0u) {
+    ps = ps * max(1.0, u.searchBoost);
+  }
+
+  let dx = c.x * (ps * 0.5) * u.invW2;
+  let dy = c.y * (ps * 0.5) * u.invH2;
 
   o.pos = vec4<f32>(x + dx, y + dy, 0.0, 1.0);
 
@@ -81,6 +90,7 @@ fn vs(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> VSOut {
   // 검색 매칭
   o.searchHit = searchMask[i];
   o.local = c;
+  o.iid = i;
 
   return o;
 }
@@ -102,7 +112,7 @@ fn fs(
     discard;
   }
 
-  // DDC 필터 (특정 DDC만 보기)
+  // DDC 필터 (특정 DDC만 보기) - dim 처리
   if (u.selectedDdc >= 0) {
     let selDdc = u32(u.selectedDdc);
     if (ddcId != selDdc) {
@@ -122,14 +132,47 @@ fn fs(
   }
 
   // 검색 하이라이트
-  if (u.searchActive != 0) {
-    let isMatch = (searchHit != 0u);
+  if (u.searchActive != 0) {  
     if (u.searchOnly != 0) {
-      if (!isMatch) { out.a = 0.0; }
+      if (searchHit == 0u) { out.a = 0.5;}
     } else {
-      if (!isMatch) { out.a = out.a * u.searchDimAlpha; }
+      if (searchHit == 0u) { out.a = out.a * u.searchDimAlpha; }
     }
   }
 
   return out;
+}
+
+@fragment
+fn fs_pick(
+  @location(1) @interpolate(flat) ddcId: u32,
+  @location(2) @interpolate(flat) clusterId: u32,
+  @location(3) @interpolate(flat) searchHit: u32,
+  @location(4) local: vec2<f32>,
+  @location(5) @interpolate(flat) iid: u32
+) -> @location(0) u32 {
+
+  // 원형 마스크
+  let r2 = dot(local, local);
+  if (r2 > 1.0) {
+    discard;
+  }
+
+  // 클러스터 선택이 only selected 모드이고, 선택이 아닌 점은 완전 숨김
+  if (u.selectedCluster >= 0) {
+    let sel = u32(u.selectedCluster);
+    let isSel = (clusterId == sel);
+    if (u.selectMode != 1) {
+      if (!isSel) { discard; }
+    }
+  }
+
+  // 검색 하이라이트
+  if (u.searchActive != 0) {
+    let isMatch = (searchHit != 0u);
+    if (u.searchOnly != 0) {
+      if (!isMatch) { discard; }
+    }
+  }
+  return iid+1u;
 }

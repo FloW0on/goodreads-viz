@@ -11,6 +11,10 @@ export class HudUI {
 
     // 기본 메시지
     this.defaultMessage = '';
+    // ---- HUD DOM profiling ----
+    this._hudCommitMsEMA = 0;
+    this._hudAlpha = 0.2; // EMA smoothing
+    this._hudCommitSeq = 0;
   }
 
   /**
@@ -51,14 +55,33 @@ export class HudUI {
   /**
    * 포인트 정보 표시
    */
-  showPointInfo(pointInfo) {
-    if (!this.el || !pointInfo) {
-      this.showDefault();
-      return;
+    showPointInfo(pointInfo) {
+      if (!this.el || !pointInfo) {
+        this.showDefault();
+        return;
+      }
+
+      const { id, ddcName, topicLabel, snippet } = pointInfo;
+
+      // ---- HUD DOM profiling (commit latency) ----
+      const seq = ++this._hudCommitSeq;
+      const t0 = performance.now();
+
+      this.el.textContent = `id=${id} | DDC: ${ddcName} | cluster: ${topicLabel}\n${snippet}`;
+
+      requestAnimationFrame(() => {
+        // 가장 최신 업데이트만 반영
+        if (seq !== this._hudCommitSeq) return;
+
+        const dt = performance.now() - t0;
+        this._hudCommitMsEMA = (this._hudCommitMsEMA === 0)
+          ? dt
+          : (1 - this._hudAlpha) * this._hudCommitMsEMA + this._hudAlpha * dt;
+      });
     }
 
-    const { id, ddcName, topicLabel, snippet } = pointInfo;
-    this.el.textContent = `id=${id} | DDC: ${ddcName} | cluster: ${topicLabel}\n${snippet}`;
+  getHudCommitMs() {
+    return this._hudCommitMsEMA;
   }
 
   /**

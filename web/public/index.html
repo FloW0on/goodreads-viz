@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Book Atlas - Embedding Visualization</title>
+  <link rel="stylesheet" href="./src/ui/breadcrumb.css" />
   <style>
     * {
       margin: 0;
@@ -36,19 +37,19 @@
       flex: 1;
       width: 100%;
       display: block;
-      cursor: grab;
+      cursor: pointer;
     }
 
     #gpuCanvas:active {
-      cursor: grabbing;
+      cursor: pointer;
     }
 
     /* HUD */
     #hud {
       position: absolute;
-      top: 12px;
+      top: 52px;
       left: 12px;
-      right: 320px;
+      right: 12px;
       background: rgba(255, 255, 255, 0.95);
       padding: 10px 14px;
       border-radius: 8px;
@@ -60,14 +61,23 @@
       z-index: 100;
     }
 
+    #breadcrumb {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 10001;  
+      pointer-events: auto;  
+    }
+
     /* 검색 바 */
     .search-bar {
       position: absolute;
       top: 12px;
-      right: 320px;
+      right: 12px;
       display: flex;
       gap: 8px;
-      z-index: 100;
+      z-index: 9998;
+      align-items: center;
     }
 
     #searchInput {
@@ -214,6 +224,8 @@
       <!-- HUD -->
       <div id="hud">loading...</div>
       
+      <div id="breadcrumb"></div>
+
       <!-- 검색 바 -->
       <div class="search-bar">
         <input type="text" id="searchInput" placeholder="Search books...">
@@ -228,6 +240,7 @@
   </div>
 
   <!-- 모듈 스크립트 -->
-  <script type="module" src="./src/main.js"></script>
+  <script type="module" src="./src/main.js"></script> 
+  <!--아주 오래된 문법이래. 타입 명-->
 </body>
 </html>
